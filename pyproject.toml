@@ -3,9 +3,9 @@ requires = ["uv_build>=0.9.18,<0.10.0"]
 build-backend = "uv_build"
 
 [project]
-name = "xnxx_api"
-version = "2.1"
-description = "A Python API for the Porn Site xnxx.com"
+name = "unofficial-api-for-xnxx"
+version = "2.2"
+description = "An asynchronous Python API wrapper and scraper for xnxx.com"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12"
 license = "LGPL-3.0-only"
@@ -13,23 +13,40 @@ license-files = ["LICENSE"]
 authors = [
     { name = "Johannes Habel", email = "EchterAlsFake@proton.me" }
 ]
+keywords = [
+    "api",
+    "scraper",
+    "async",
+    "asyncio",
+    "video-downloader",
+    "selectolax",
+    "curl-cffi",
+    "hqporner"
+]
 dependencies = [
-    "av>=17.1.0",
-    "bs4",
-    "eaf_base_api",
+    "selectolax",
+    "eaf-base-api",
     "m3u8",
 ]
 classifiers = [
-    "Programming Language :: Python",
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Multimedia :: Video"
 ]
 
 [project.optional-dependencies]
-av = ["av; python_version >= '3.10'"]
-full = ["lxml"] # H2 for HTTP 2.0 support, LXML for faster parsing speed, though optional :)
+av = ["av"]
 
 [project.urls]
-Homepage = "https://github.com/EchterAlsFake/xnxx_api"
-
+Homepage = "https://github.com/EchterAlsFake/unofficial-api-for-xnxx"
+Repository = "https://github.com/EchterAlsFake/unofficial-api-for-xnxx"
+"Bug Tracker" = "https://github.com/EchterAlsFake/unofficial-api-for-xnxx/issues"
 [project.scripts]
 xnxx_api = "xnxx_api.xnxx_api:main"
 
@@ -40,3 +57,6 @@ packages = { find = {} }
 [tool.uv.build-backend]
 module-name = "xnxx_api"
 module-root = ""
+
+[tool.uv.sources]
+eaf-base-api = { path = "../eaf_base_api", editable = true }

@@ -1,17 +1,4 @@
-from base_api.modules.type_hints import DownloadReport
-
-try:
-    from modules.consts import *
-    from modules.errors import *
-    from modules.type_hints import *
-    from modules.search_filters import *
-
-except (ModuleNotFoundError, ImportError):
-    from .modules.consts import *
-    from .modules.errors import *
-    from .modules.type_hints import *
-    from .modules.search_filters import *
-
+import asyncio
 import os
 import re
 import html
@@ -21,20 +8,20 @@ import argparse
 import threading
 import math
 
-from bs4 import BeautifulSoup
 from typing import AsyncGenerator
 from functools import cached_property
+from dataclasses import dataclass, fields
 from curl_cffi import Response, AsyncSession
-from base_api.base import BaseCore, setup_logger, Helper
 from base_api.modules.static_functions import str_to_bool
-from base_api.modules.errors import NetworkingError, InvalidProxy, BotProtectionDetected, UnknownError, ResourceGone
+from base_api import BaseCore, Helper, BaseMedia, ScrapeResult
+from base_api.modules.errors import NetworkRequestError, InvalidProxy, BotProtectionDetected, UnknownError, ResourceGone
+from selectolax.lexbor import LexborHTMLParser
 
-try:
-    import lxml
-    parser = "lxml"
-
-except (ModuleNotFoundError, ImportError):
-    parser = "html.parser"
+from xnxx_api.modules.errors import (NetworkError, ProxyError, UnknownNetworkError, NotFound, BotDetection,
+                                     InvalidResponse, RegionBlocked)
+from xnxx_api.modules.consts import headers
+from xnxx_api.modules.type_hints import on_error_hint
+from xnxx_api.modules.search_filters import SearchingQuality, Mode, Length, UploadTime
 
 
 async def on_error(url: str, error: Exception, attempt: int) -> bool:
@@ -56,7 +43,7 @@ async def get_html_content(core: BaseCore, url: str) -> str | None | dict:
         if isinstance(content, Response):
             raise RegionBlocked(f"The Video: {url} is not available in your country!")
 
-    except NetworkingError as e:
+    except NetworkRequestError as e:
         raise NetworkError(str(e)) from e
 
     except InvalidProxy as e:
@@ -70,189 +57,49 @@ async def get_html_content(core: BaseCore, url: str) -> str | None | dict:
 
 
 
-class Video:
-    def __init__(self, url: str, core: BaseCore, html_content: str | None = None):
-        self.url = url
-        self.core = core
-        self.available_m3u8_urls = None
-        self.script_content = None
-        self.html_content = html_content
-        self.metadata_matches = None
-        self.json_content = None
-        self._soup: BeautifulSoup | None = None
-        self.logger = setup_logger(name="XNXX API - [Video]", log_file=None, level=logging.CRITICAL)
+@dataclass(kw_only=True, slots=True)
+class Video(BaseMedia):
+    url: str
+    core: BaseCore
 
-    def enable_logging(self, log_file, level, log_ip: str | None = None, log_port: int | None = None):
-        self.logger = setup_logger(name="XNXX API - [Video]", log_file=log_file, level=level, http_ip=log_ip, http_port=log_port)
+    async def _perform_load(self, api: bool, html: bool, anything_else: bool):
+        if html:
+            await asyncio.gather(self._fetch_html())
 
-    async def init(self):
-        if not REGEX_VIDEO_CHECK.search(self.url):
-            raise InvalidUrl("The video URL is invalid!")
+    async def _fetch_html(self):
+        html_content = await get_html_content(core=self.core, url=self.url)
+        assert isinstance(html_content, str)
+        data: dict = await asyncio.to_thread(self._extract_html, html_content)
+        allowed_fields = [field.name for field in fields(self)]
+        for key, value in data.items():
+            if key in allowed_fields:
+                setattr(self, key, value)
 
-        if not self.html_content:
-            self.html_content = await get_html_content(core=self.core, url=self.url)
+    @staticmethod
+    def _extract_html(html_content: str) -> dict:
+        parser = LexborHTMLParser(html_content)
 
-        self._soup = BeautifulSoup(self.html_content, parser)
+        _script = parser.css_first('script[type="application/ld+json"]')
+        script: dict = json.loads(_script.text())
 
-        self.get_script_content()
-        self.get_metadata_matches()
-        self.extract_json_from_html()
-        return self
+        title = html.unescape(script.get("title"))
+        description = html.unescape(script.get("description"))
+        thumbnail_url = html.unescape(script.get("thumbnailUrl").get("thumbnail_url"))
+        publish_date = html.unescape(script.get("uploadDate"))
+        length = html.unescape(script.get("duration"))
+        m3u8_base_url = script.get("contentUrl")
+        views = script.get("interactionStatistic").get("userInteractionCount")
 
-    @property
-    def soup(self) -> BeautifulSoup:
-        if not self._soup:
-            raise ValueError("You probably forgot to call init")
+        return {
+            "title": title,
+            "description": description,
+            "thumbnail_url": thumbnail_url,
+            "publish_date": publish_date,
+            "length": length,
+            "m3u8_base_url": m3u8_base_url,
+            "views": views
+        }
 
-        return self._soup
-
-    @classmethod
-    def is_desired_script(cls, tag):
-        if tag.name != "script":
-            return False
-        script_contents = ['html5player', 'setVideoTitle', 'setVideoUrlLow']
-        return all(content in tag.text for content in script_contents)
-
-    def get_metadata_matches(self) -> None:
-        metadata_span = self.soup.find('span', class_='metadata')
-        metadata_text = metadata_span.get_text()
-
-        # Use a regex to extract the desired strings
-        self.metadata_matches = re.findall(r'(\d+min|\d+p|\d[\d.,]*\s*[views]*)', metadata_text)
-
-    def get_script_content(self) -> None:
-        target_script = self.soup.find(self.is_desired_script)
-        if target_script:
-            self.script_content = target_script.text
-
-        else:
-            raise InvalidResponse("Couldn't extract JSON from HTML")
-
-    def extract_json_from_html(self) -> None:
-        # Find the <script> tag with type="application/ld+json"
-        script_tag = self.soup.find('script', {'type': 'application/ld+json'})
-
-        if script_tag:
-            json_text = script_tag.string.strip()  # Get the content of the tag as a string
-            data = json.loads(json_text)
-            self.json_content = data
-
-    @cached_property
-    def m3u8_base_url(self) -> str:
-        """
-        The m3u8 base URL is a file that contains the list of segments (.ts files) for the different resolutions.
-        This is basically the whole magic for all my APIs :)
-        :return: (str) The m3u8 base URL
-        """
-        return REGEX_VIDEO_M3U8.search(self.script_content).group(1)
-
-    async def get_segments(self, quality: str) -> list:
-        return await self.core.get_segments(quality=quality, m3u8_url_master=self.m3u8_base_url)
-
-    async def download(self, quality, path="./", callback: callback_hint=None, no_title=False, remux: bool = False,
-                 callback_remux: callback_hint =None, start_segment: int = 0, stop_event: threading.Event | None = None,
-                 segment_state_path: str | None = None, segment_dir: str | None = None,
-                 return_report: bool = False, cleanup_on_stop: bool = True, keep_segment_dir: bool = False
-                 ) -> bool | DownloadReport:
-        """
-        :param callback:
-        :param quality:
-        :param path:
-        :param no_title:
-        :param remux:
-        :param callback_remux:
-        :param start_segment:
-        :param stop_event:
-        :param segment_state_path:
-        :param segment_dir:
-        :param return_report:
-        :param cleanup_on_stop:
-        :param keep_segment_dir:
-        :return:
-        """
-        if not no_title:
-            path = os.path.join(path, f"{self.title}.mp4")
-
-        return await self.core.download(video=self, quality=quality, path=path, callback=callback, remux=remux,
-                           callback_remux=callback_remux, start_segment=start_segment, stop_event=stop_event,
-                           segment_state_path=segment_state_path, segment_dir=segment_dir, return_report=return_report,
-                           cleanup_on_stop=cleanup_on_stop, keep_segment_dir=keep_segment_dir)
-
-    @cached_property
-    def title(self) -> str:
-        return html.unescape(REGEX_VIDEO_TITLE.search(self.script_content).group(1))
-
-    @cached_property
-    def author(self) -> str:
-        return REGEX_VIDEO_UPLOADER.search(self.script_content).group(1)
-
-    @cached_property
-    def length(self) -> str:
-        length = self.metadata_matches[0]
-        length = str(length).strip("min")
-        return length
-
-    @cached_property
-    def highest_quality(self) -> str:
-        return self.metadata_matches[1]
-
-    @cached_property
-    def views(self) -> str:
-        try:
-            views = self.metadata_matches[2]
-
-        except IndexError:
-            views = self.metadata_matches[1]
-
-        return views
-
-    @cached_property
-    def comment_count(self) -> str:
-        return REGEX_VIDEO_COMMENT_COUNT.search(self.html_content).group(1)
-
-    @cached_property
-    def likes(self) -> str:
-        return REGEX_VIDEO_LIKES.search(self.html_content).group(1)
-
-    @cached_property
-    def dislikes(self) -> str:
-        return REGEX_VIDEO_DISLIKES.search(self.html_content).group(1)
-
-    @cached_property
-    def pornstars(self) -> list:
-        pornstar_list = REGEX_VIDEO_PORNSTARS.findall(self.html_content)
-        pornstar_list_filtered = []
-        for pornstar in pornstar_list:
-            pornstar = str(pornstar).replace("+", " ")
-            pornstar_list_filtered.append(pornstar)
-
-        return pornstar_list_filtered
-
-    @cached_property
-    def tags(self) -> list:
-        tags_list = REGEX_VIDEO_KEYWORDS.findall(self.html_content)
-        tags_list_filtered = []
-        for tag in tags_list:
-            tag = str(tag).replace("+", " ")
-            tags_list_filtered.append(tag)
-
-        return tags_list_filtered
-
-    @cached_property
-    def description(self) -> str:
-        return html.unescape(self.json_content["description"])
-
-    @cached_property
-    def thumbnail_url(self) -> list:
-        return self.json_content["thumbnailUrl"]
-
-    @cached_property
-    def publish_date(self) -> str:
-        return self.json_content["uploadDate"]
-
-    @cached_property
-    def content_url(self) -> str:
-        return self.json_content["contentUrl"]
 
 
 class Search(Helper):
