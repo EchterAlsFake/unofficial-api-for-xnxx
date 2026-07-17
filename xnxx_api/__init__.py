@@ -2,9 +2,9 @@
 
 __all__ = [
     "Client", "BaseCore", "Video",
-    "errors", "consts", "search_filters", "category"
+    "errors", "consts", "search_filters"
 ]
 
-# Public API from xnxx_api.py
-from xnxx_api.xnxx_api import Client, BaseCore, Video
-from xnxx_api.modules import errors, consts, category, search_filters
+# Public API from api.py
+from xnxx_api.api import Client, BaseCore, Video
+from xnxx_api.modules import errors, consts, search_filters

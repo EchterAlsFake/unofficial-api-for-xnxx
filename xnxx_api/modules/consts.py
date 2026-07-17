@@ -1,51 +1,81 @@
 import re
-import html
-import json
-
-from typing import List
+from selectolax.lexbor import LexborHTMLParser
 # ROOT URLs
+
 ROOT_URL = "https://www.xnxx.com/"
 
 # REGEX
-REGEX_VIDEO_CHECK = re.compile(r"xnxx.com/(.*?)")
-REGEX_VIDEO_TITLE = re.compile(r"html5player\.setVideoTitle\('([^']*)'\);")
-REGEX_VIDEO_UPLOADER = re.compile(r"html5player\.setUploaderName\('([^']*)'\);")
-REGEX_VIDEO_LIKES = re.compile(r'<span class="icon thumb-up"></span><span class="value">(.*?)</span>', re.DOTALL)
-REGEX_VIDEO_DISLIKES = re.compile(r'<span class="icon thumb-down"></span><span class="value">(.*?)</span>', re.DOTALL)
-REGEX_VIDEO_COMMENT_COUNT = re.compile(r'<span class="icon comments"></span><span class="value">(.*?)</span>')
-REGEX_VIDEO_PORNSTARS = re.compile(r'<a class="is-pornstar" href="/search/(.*?)">')
-REGEX_VIDEO_KEYWORDS = re.compile(r'<a class="is-keyword" href="/search/(.*?)">')
-REGEX_VIDEO_M3U8 = re.compile(r"html5player\.setVideoHLS\('([^']+)'\);")
-
-REGEX_SCRAPE_VIDEOS = re.compile(r'<div class="thumb"><a href="/video-(.*?)"')
-
-REGEX_SEARCH_TOTAL_PAGES = re.compile(r'class="last-page">(.*?)</a>')
-REGEX_MODEL_TOTAL_PAGES = re.compile(r'<a class="last-page" data-page="(.*?)">')
 REGEX_MODEL_TOTAL_VIDEO_VIEWS = re.compile(r'<span class="icon-f icf-eye"></span> (.*?) video views')
+REGEX_EXTRACT_M3U8_URL = re.compile(r"html5player\.setVideoHLS\(['\"]([^'\"]+)['\"]\)")
 
 headers = {
     "Referer": "https://www.xnxx.com/"
 }
 
 
-def extractor_json(content: str) -> List[str]:
-    data = json.loads(html.unescape(content))
-    if data["code"] == 404:
-        return []
+def extractor_html(content: str) -> list[dict]:
+    parser = LexborHTMLParser(content)
+    extracted_videos = []
 
-    videos = data["videos"]
-    video_urls = []
-    for video in videos:
-        video_urls.append(f"https://xnxx.com{video.get('u')}")
+    # Target all divs where the ID attribute starts with 'video_'
+    for video_node in parser.css('div[id^="video_"]'):
 
-    return video_urls
+        # Initialize the dictionary with existing dataclass fields
+        # 'core' is omitted here as it requires your specific BaseCore instantiation
+        video_data = {
+            "url": None,
+            "title": None,
+            "thumbnail": None,
+            "length": None,
+            "views": None,
+        }
 
+        # Extract URL and Title
+        a_tag = video_node.css_first('.thumb-under p a')
+        if a_tag:
+            video_data["url"] = a_tag.attributes.get("href")
+            video_data["title"] = a_tag.attributes.get("title") or a_tag.text(strip=True)
 
-def extractor_html(content: str) -> List[str]:
-    urls = REGEX_SCRAPE_VIDEOS.findall(content)
-    video_urls = []
-    for url_ in urls:
-        if not "THUMBNUM" in url_:
-            video_urls.append(f"https://www.xnxx.com/video-{url_}")
+        # Extract Thumbnail and new media URLs
+        img_tag = video_node.css_first('.thumb img')
+        if img_tag:
+            video_data["thumbnail"] = img_tag.attributes.get("src")
+            video_data["video_id"] = img_tag.attributes.get("data-videoid")
+            video_data["preview_video_url"] = img_tag.attributes.get("data-pvv")
 
-    return video_urls
+        # Also grab the element ID (e.g., "lgqbz55")
+        video_data["video_eid"] = video_node.attributes.get("data-eid")
+
+        # Extract Metadata (Views, Length, Rating, Quality)
+        metadata_node = video_node.css_first('.metadata')
+        if metadata_node:
+
+            # 1. Rating
+            rating_node = metadata_node.css_first('.right .superfluous')
+            if rating_node:
+                video_data["rating"] = rating_node.text(strip=True)
+
+            # 2. Views (Cleaned by stripping out the rating text)
+            right_span = metadata_node.css_first('.right')
+            if right_span:
+                views_text = right_span.text(strip=True)
+                if video_data.get("rating"):
+                    views_text = views_text.replace(video_data["rating"], "")
+                video_data["views"] = views_text.strip()
+
+            # 3. Quality (e.g., 1080p)
+            hd_span = metadata_node.css_first('.video-hd')
+            if hd_span:
+                # Extract text and remove the decorative " - " string
+                quality_text = hd_span.text(strip=True).replace("-", "").strip()
+                video_data["max_quality"] = quality_text
+
+            # 4. Length (Using regex to reliably extract the 'Xmin' pattern from the raw block text)
+            raw_metadata_text = metadata_node.text(separator=" ", strip=True)
+            length_match = re.search(r'(\d+min)', raw_metadata_text)
+            if length_match:
+                video_data["length"] = length_match.group(1)
+
+        extracted_videos.append(video_data)
+
+    return extracted_videos
