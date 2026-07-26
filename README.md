@@ -2,9 +2,10 @@
 <p align="center"><em>An asynchronous Python API wrapper and scraper for xnxx.com</em></p>
 
 <div align="center">
-    <a href="https://pepy.tech/project/xnxx_api"><img src="https://static.pepy.tech/badge/xnxx_api" alt="Downloads"></a>
+    <a href="https://pepy.tech/project/xnxx_api"><img src="https://static.pepy.tech/badge/xnxx_api" alt="Downloads"></a> +
+    <a href="https://pepy.tech/project/unofficial-api-for-xnxx"><img src="https://static.pepy.tech/badge/unofficial-api-for-xnxx" alt="Downloads"></a>
     <a href="https://github.com/EchterAlsFake/xnxx_api/workflows/"><img src="https://github.com/EchterAlsFake/xnxx_api/workflows/CodeQL/badge.svg" alt="CodeQL Analysis"/></a>
-    <a href="https://echteralsfake.me/ci/xnxx_api/badge.svg"><img src="https://echteralsfake.me/ci/xnxx_api/badge.svg" alt="API Tests"/></a>
+    <a href="https://echteralsfake.me/ci/unofficial-api-for-xnxx/badge.svg"><img src="https://echteralsfake.me/ci/unofficial-api-for-xnxx/badge.svg" alt="API Tests"/></a>
     </div>
 
 # Disclaimer
@@ -61,11 +62,8 @@ This API has been tested and confirmed working on:
 
 # Installation
 
-> [!WARNING]
-> The installation from Git is **temporary**. The package will be migrated to PyPI within the next week.
-
 ```bash
-pip install git+https://github.com/EchterAlsFake/unofficial-api-for-beeg git+https://github.com/EchterAlsFake/eaf_base_api
+pip install unofficial-api-for-xnxx
 ```
 
 ---
@@ -74,6 +72,8 @@ pip install git+https://github.com/EchterAlsFake/unofficial-api-for-beeg git+htt
 
 ### Have a look at the [Documentation](https://docs.echteralsfake.me/xnxx) for more details
 
+> [!NOTE]
+> XNXX API can also be used from the command line. Do: xnxx_api -h to see the options
 
 ```python
 import asyncio
@@ -93,16 +93,9 @@ async def main():
     config = DownloadConfigHLS(quality="best", path="./") # More options in the documentation
     await video_object.download(config)
 
-# SEE DOCUMENTATION FOR MORE
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
-
-> [!NOTE]
-> XNXX API can also be used from the command line. Do: xnxx_api -h to see the options
-
----
-
-# Changelog
-See [Changelog](https://github.com/EchterAlsFake/xnxx_api/blob/master/README/Changelog.md) for more details.
 
 ---
 
@@ -131,5 +124,12 @@ in the discussions.
 Pull requests are also welcome.
 
 # License
-Licensed under the LGPLv3 License
-<br>Copyright (C) 2023–2026 Johannes Habel
+This API is licensed under the AGPLv3. See the `LICENSE` file for details.
+
+> [!CAUTION]
+> **Using this in a proprietary application?**
+> Under the AGPLv3, if you integrate, modify, or host this API as part of your application (even over a network), you must open-source your entire application's code under the AGPL. 
+>
+> If you want to use this API without open-sourcing your own code, you must purchase a commercial license.
+> 
+> **For commercial licensing, contact:** EchterAlsFakeBS@proton.me
