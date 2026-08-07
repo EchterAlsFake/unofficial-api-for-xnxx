@@ -14,7 +14,6 @@ async def test_all():
     idx = 0
     async for video in user.videos():
         idx += 1
-        assert isinstance(video.video.title, str)
+        assert isinstance(video.unwrap().title, str)
         if idx == 3:
             break
-

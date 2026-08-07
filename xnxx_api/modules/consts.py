@@ -36,6 +36,9 @@ def extractor_html(content: str) -> list[dict]:
             video_data["url"] = a_tag.attributes.get("href")
             video_data["title"] = a_tag.attributes.get("title") or a_tag.text(strip=True)
 
+        if not isinstance(video_data["url"], str) or not video_data["url"]:
+            continue
+
         # Extract Thumbnail and new media URLs
         img_tag = video_node.css_first('.thumb img')
         if img_tag:

@@ -7,16 +7,39 @@ import logging
 import asyncio
 import argparse
 
-from typing import AsyncGenerator
-from dataclasses import dataclass, fields
-from curl_cffi import Response, AsyncSession
+from typing import AsyncGenerator, ClassVar
+from dataclasses import dataclass
+from curl_cffi import AsyncSession
 from selectolax.lexbor import LexborHTMLParser
 from base_api.modules.type_hints import DownloadReport
 from base_api.modules.static_functions import str_to_bool
-from base_api import BaseCore, Helper, BaseMedia, ScrapeResult, DownloadConfigHLS
-from base_api.modules.errors import NetworkRequestError, InvalidProxy, BotProtectionDetected, UnknownError, ResourceGone
+from base_api import (
+    BaseCore,
+    BaseMedia,
+    DownloadConfigHLS,
+    ErrorAction,
+    ErrorHandler,
+    ErrorMode,
+    Helper,
+    MediaLoadError,
+    MediaLoadErrors,
+    ResultOrder,
+    RetryPolicy,
+    ScrapeErrorContext,
+    ScrapeResult,
+    media_field,
+)
+from base_api.modules.errors import (
+    AccessDeniedError,
+    BotProtectionDetected,
+    HTTPStatusError,
+    InvalidProxy,
+    NetworkRequestError,
+    RequestRetriesExhausted,
+    ResourceGone,
+    UnknownError,
+)
 
-from xnxx_api.modules.type_hints import on_error_hint
 from xnxx_api.modules.errors import (NetworkError, ProxyError, UnknownNetworkError, BotDetection, RegionBlocked,
                                      DownloadFailed)
 from xnxx_api.modules.consts import headers, REGEX_MODEL_TOTAL_VIDEO_VIEWS, extractor_html, REGEX_EXTRACT_M3U8_URL
@@ -26,28 +49,43 @@ from xnxx_api.modules.search_filters import SearchingQuality, Mode, Length, Uplo
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
+SCRAPE_RETRY_POLICY = RetryPolicy(max_attempts=3)
 
-async def on_error(url: str, error: Exception, attempt: int) -> bool:
-    logger.error(f"URL: {url}, ERROR: {error}, Attempt: {attempt}")
 
+def _is_resource_gone(error: BaseException) -> bool:
     if isinstance(error, ResourceGone):
-        return False
+        return True
+    if isinstance(error, MediaLoadError):
+        return _is_resource_gone(error.original_error)
+    if isinstance(error, MediaLoadErrors):
+        return any(_is_resource_gone(item) for item in error.errors)
+    return False
 
-    return True
+
+async def on_error(context: ScrapeErrorContext) -> ErrorAction:
+    logger.error(
+        "URL: %s, ERROR: %s, Attempt: %s/%s",
+        context.url,
+        context.error,
+        context.attempt,
+        context.max_attempts,
+    )
+
+    if _is_resource_gone(context.error):
+        return ErrorAction.SKIP
+
+    return ErrorAction.RETRY
 
 
-async def get_html_content(core: BaseCore, url: str) -> str | None | dict:
-    # What should I do here?
+async def get_html_content(core: BaseCore, url: str) -> str:
     try:
-        content = await core.fetch(url)
-        if isinstance(content, str):
-            return content
+        return await core.fetch_text(url)
 
-        if isinstance(content, Response):
-            logger.error(f"Region Blocked: Video {url} is not available")
-            raise RegionBlocked(f"The Video: {url} is not available in your country!")
+    except (AccessDeniedError, HTTPStatusError) as e:
+        logger.error("Region Blocked: Video %s is not available", url)
+        raise RegionBlocked(f"The Video: {url} is not available in your country!") from e
 
-    except NetworkRequestError as e:
+    except (NetworkRequestError, RequestRetriesExhausted) as e:
         raise NetworkError(str(e)) from e
 
     except InvalidProxy as e:
@@ -65,13 +103,13 @@ async def get_html_content(core: BaseCore, url: str) -> str | None | dict:
 class Video(BaseMedia):
     url: str
     core: BaseCore
-    title: str | None = None
-    description: str | None = None
-    thumbnail: str | None = None
-    publish_date: str | None = None
-    length: str | None = None
-    m3u8_base_url: str | None = None
-    views: str | None = None
+    title: str | None = media_field("html")
+    description: str | None = media_field("html")
+    thumbnail: str | None = media_field("html")
+    publish_date: str | None = media_field("html")
+    length: str | None = media_field("html")
+    m3u8_base_url: str | None = media_field("html")
+    views: str | None = media_field("html")
 
     # Optional
     video_id: str | None = None
@@ -80,18 +118,11 @@ class Video(BaseMedia):
     rating: str | None = None
     max_quality: str | None = None
 
-    async def _perform_load(self, api: bool, html: bool, anything_else: bool):
-        if html:
-            await asyncio.gather(self._fetch_html())
+    loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
 
-    async def _fetch_html(self):
+    async def _load_html(self) -> dict[str, object]:
         html_content = await get_html_content(core=self.core, url=self.url)
-        assert isinstance(html_content, str)
-        data: dict = await asyncio.to_thread(self._extract_html, html_content)
-        allowed_fields = [field.name for field in fields(self)]
-        for key, value in data.items():
-            if key in allowed_fields:
-                setattr(self, key, value)
+        return await asyncio.to_thread(self._extract_html, html_content)
 
     @staticmethod
     def _extract_html(html_content: str) -> dict:
@@ -122,6 +153,7 @@ class Video(BaseMedia):
         }
 
     async def download(self, configuration: DownloadConfigHLS) -> bool | DownloadReport:
+        await self.load_fields("m3u8_base_url", "title")
         config = copy.deepcopy(configuration)
         config.m3u8_base_url = self.m3u8_base_url
         if not config.no_title:
@@ -137,25 +169,18 @@ class Video(BaseMedia):
 class User(BaseMedia):
     url: str
     core: BaseCore
-    total_videos_count: int | None = None
-    total_pages_count: int | None = None
-    total_videos_views: str | None = None
+    total_videos_count: int | None = media_field("html")
+    total_pages_count: int | None = media_field("html")
+    total_videos_views: str | None = media_field("html")
 
-    async def _perform_load(self, api: bool, html: bool, anything_else: bool):
-        if html:
-            await asyncio.gather(self._fetch_html())
+    loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
 
-    async def _fetch_html(self):
+    async def _load_html(self) -> dict[str, object]:
         html_content_task = asyncio.create_task(get_html_content(core=self.core, url=self.url))
         base_json_task = asyncio.create_task(get_html_content(core=self.core, url=f"{self.url}/videos/best/0"))
         html_content, base_json = await asyncio.gather(html_content_task, base_json_task)
 
-        assert isinstance(html_content, str)
-        data: dict = await asyncio.to_thread(self._extract_data, html_content, base_json)
-        allowed_fields = [field.name for field in fields(self)]
-        for key, value in data.items():
-            if key in allowed_fields:
-                setattr(self, key, value)
+        return await asyncio.to_thread(self._extract_data, html_content, base_json)
 
     @staticmethod
     def _extract_data(html_content: str, base_json: str) -> dict:
@@ -174,12 +199,13 @@ class User(BaseMedia):
         }
 
     async def videos(self, videos_concurrency: int | None = None, pages_concurrency: int | None = None,
-               pages: int = 0, on_video_error: on_error_hint = on_error, on_page_error: on_error_hint = None,
+               pages: int = 0, on_video_error: ErrorHandler | None = on_error, on_page_error: ErrorHandler | None = None,
                      keep_original_order: bool = False, load_html: bool = False) -> AsyncGenerator[ScrapeResult, None]:
 
-        if pages >= self.total_pages_count:
-            self.logger.warning(f"You are trying to fetch more pages than there are... Reducing to: {self.total_pages_count}")
-            pages = int(self.total_pages_count)
+        total_pages_count = await self.get_field("total_pages_count")
+        if pages >= total_pages_count:
+            self.logger.warning(f"You are trying to fetch more pages than there are... Reducing to: {total_pages_count}")
+            pages = int(total_pages_count)
 
         helper = Helper(core=self.core, constructor=Video)
         page_urls = [f"{self.url}/videos/best/{page}" for page in range(pages)]
@@ -187,12 +213,23 @@ class User(BaseMedia):
         videos_concurrency = videos_concurrency or self.core.configuration.videos_concurrency
         pages_concurrency = pages_concurrency or self.core.configuration.pages_concurrency
         assert videos_concurrency and pages_concurrency
-        async for result in helper.iterator(target_page_urls=page_urls, max_video_concurrency=videos_concurrency,
-                                 max_page_concurrency=pages_concurrency, video_link_extractor=extractor_html,
-                                 on_video_error=on_video_error, on_page_error=on_page_error,
-                                 keep_original_order=keep_original_order, fetch_html=load_html):
-            logger.debug(f"Received Result: {result.is_success}")
-            yield result
+        stream = helper.iterator(
+            target_page_urls=page_urls,
+            item_extractor=extractor_html,
+            max_item_concurrency=videos_concurrency,
+            max_page_concurrency=pages_concurrency,
+            load_sources=("html",) if load_html else (),
+            order=(ResultOrder.ORIGINAL if keep_original_order else ResultOrder.COMPLETION),
+            page_error_mode=ErrorMode.SKIP,
+            page_retry=SCRAPE_RETRY_POLICY,
+            item_retry=SCRAPE_RETRY_POLICY,
+            item_error_handler=on_video_error,
+            page_error_handler=on_page_error,
+        )
+        async with stream:
+            async for result in stream:
+                logger.debug("Received Result: %s", result.succeeded)
+                yield result
 
 
 class Client:
@@ -211,7 +248,9 @@ class Client:
         """
         logger.info(f"Initializing Video object: {url}, HTML: {load_html}")
         video = Video(url=url, core=self.core)
-        return await video.load(html=load_html)
+        if load_html:
+            await video.load_sources("html")
+        return video
 
     async def get_user(self, url: str, load_html: bool = True) -> User:
         """
@@ -221,12 +260,14 @@ class Client:
         """
         logger.info(f"Initializing User object: {url}, HTML: {load_html}")
         user = User(url=url, core=self.core)
-        return await user.load(html=load_html)
+        if load_html:
+            await user.load_sources("html")
+        return user
 
 
     async def search_videos(self, query: str, pages_concurrency: int | None = None, videos_concurrency: int | None = None,  pages: int = 0,
-                     on_video_error: on_error_hint = on_error,
-                     on_page_error: on_error_hint = None,
+                     on_video_error: ErrorHandler | None = on_error,
+                     on_page_error: ErrorHandler | None = None,
                      keep_original_order: bool = False,
                      load_html: bool = False,
                      mode: Mode | str = "",
@@ -244,11 +285,22 @@ class Client:
         videos_concurrency = (videos_concurrency or self.core.configuration.videos_concurrency)
         pages_concurrency = pages_concurrency or self.core.configuration.pages_concurrency
         assert videos_concurrency and pages_concurrency
-        async for result in helper.iterator(target_page_urls=page_urls, max_video_concurrency=videos_concurrency,
-                                 max_page_concurrency=pages_concurrency, video_link_extractor=extractor_html,
-                                 on_video_error=on_video_error, on_page_error=on_page_error,
-                                 keep_original_order=keep_original_order, fetch_html=load_html):
-                logger.debug(f"Returning result: {result.is_success}")
+        stream = helper.iterator(
+            target_page_urls=page_urls,
+            item_extractor=extractor_html,
+            max_item_concurrency=videos_concurrency,
+            max_page_concurrency=pages_concurrency,
+            load_sources=("html",) if load_html else (),
+            order=(ResultOrder.ORIGINAL if keep_original_order else ResultOrder.COMPLETION),
+            page_error_mode=ErrorMode.SKIP,
+            page_retry=SCRAPE_RETRY_POLICY,
+            item_retry=SCRAPE_RETRY_POLICY,
+            item_error_handler=on_video_error,
+            page_error_handler=on_page_error,
+        )
+        async with stream:
+            async for result in stream:
+                logger.debug("Returning result: %s", result.succeeded)
                 yield result
 
 
