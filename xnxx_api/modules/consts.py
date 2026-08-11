@@ -33,7 +33,7 @@ def extractor_html(content: str) -> list[dict]:
         # Extract URL and Title
         a_tag = video_node.css_first('.thumb-under p a')
         if a_tag:
-            video_data["url"] = a_tag.attributes.get("href")
+            video_data["url"] = f"https://xnxx.com{a_tag.attributes.get("href")}"
             video_data["title"] = a_tag.attributes.get("title") or a_tag.text(strip=True)
 
         if not isinstance(video_data["url"], str) or not video_data["url"]:

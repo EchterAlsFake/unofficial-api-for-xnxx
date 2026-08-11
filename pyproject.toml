@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "unofficial-api-for-xnxx"
-version = "2.3"
+version = "2.4"
 description = "An asynchronous Python API wrapper and scraper for xnxx.com"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12"

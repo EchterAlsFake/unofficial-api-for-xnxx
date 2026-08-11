@@ -54,8 +54,8 @@ SCRAPE_RETRY_POLICY = RetryPolicy(max_attempts=3)
 def make_iterator_config() -> IteratorConfig:
     return IteratorConfig(
         load_specific_sources=("html",),
-        item_retry=SCRAPE_RETRY_POLICY,
-        page_retry=SCRAPE_RETRY_POLICY,
+        item_retry=None,
+        page_retry=None,
         page_error_mode=ErrorMode.SKIP,
         item_error_handler=None,
         page_error_handler=None,
@@ -212,7 +212,7 @@ class User(BaseMedia):
         self,
         pages: int = 0,
         iterator_config: IteratorConfig | None = None,
-    ) -> AsyncGenerator[ScrapeResult, None]:
+    ) -> AsyncGenerator[ScrapeResult[Video], None]:
 
         total_pages_count = await self.get_field("total_pages_count")
         if pages >= total_pages_count:
@@ -275,7 +275,7 @@ class Client:
                      length: Length | str = "",
                      searching_quality: SearchingQuality | str = "",
                      iterator_config: IteratorConfig | None = None,
-                     ) -> AsyncGenerator[ScrapeResult, None]:
+                     ) -> AsyncGenerator[ScrapeResult[Video], None]:
         url = f"https://www.xnxx.com/search{mode}{upload_time}{length}{searching_quality}/{query}"
 
         helper = Helper(core=self.core, constructor=Video)
