@@ -120,6 +120,8 @@ class Video(BaseMedia):
     length: str | None = media_field("html")
     m3u8_base_url: str | None = media_field("html")
     views: str | None = media_field("html")
+    author: str | None = media_field("html")
+    tags: list[str] | None = media_field("html")
 
     # Optional
     video_id: str | None = None
@@ -148,6 +150,8 @@ class Video(BaseMedia):
         publish_date = html.unescape(script.get("uploadDate"))
         length = html.unescape(script.get("duration"))
         views = script.get("interactionStatistic").get("userInteractionCount")
+        author = parser.css_first("div.video-title-container").css_first("a.gold-plate").text(strip=True)
+        tags = [tag.text(strip=True) for tag in parser.css("a.is-keyword")]
 
         m3u8_base_url = REGEX_EXTRACT_M3U8_URL.search(html_content).group(1)
 
@@ -159,7 +163,9 @@ class Video(BaseMedia):
             "publish_date": publish_date,
             "length": length,
             "m3u8_base_url": m3u8_base_url,
-            "views": views
+            "views": views,
+            "author": author,
+            "tags": tags
         }
 
     async def download(self, configuration: DownloadConfigHLS) -> bool | DownloadReport:
