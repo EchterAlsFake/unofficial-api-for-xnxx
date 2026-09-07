@@ -27,6 +27,11 @@ from base_api import (
     ScrapeErrorContext,
     ScrapeResult,
     media_field,
+    make_iterator_config,
+    is_resource_gone,
+    default_on_error,
+    scrape_stream,
+    get_text_safe,
 )
 from base_api.modules.errors import (
     AccessDeniedError,
@@ -50,41 +55,8 @@ logger.addHandler(logging.NullHandler())
 
 SCRAPE_RETRY_POLICY = RetryPolicy(max_attempts=3)
 
-
-def make_iterator_config() -> IteratorConfig:
-    return IteratorConfig(
-        load_specific_sources=("html",),
-        item_retry=None,
-        page_retry=None,
-        page_error_mode=ErrorMode.SKIP,
-        item_error_handler=None,
-        page_error_handler=None,
-    )
-
-
-def _is_resource_gone(error: BaseException) -> bool:
-    if isinstance(error, ResourceGone):
-        return True
-    if isinstance(error, MediaLoadError):
-        return _is_resource_gone(error.original_error)
-    if isinstance(error, MediaLoadErrors):
-        return any(_is_resource_gone(item) for item in error.errors)
-    return False
-
-
-async def on_error(context: ScrapeErrorContext) -> ErrorAction:
-    logger.error(
-        "URL: %s, ERROR: %s, Attempt: %s/%s",
-        context.url,
-        context.error,
-        context.attempt,
-        context.max_attempts,
-    )
-
-    if _is_resource_gone(context.error):
-        return ErrorAction.SKIP
-
-    return ErrorAction.RETRY
+_is_resource_gone = is_resource_gone
+on_error = default_on_error
 
 
 async def get_html_content(core: BaseCore, url: str) -> str:
@@ -150,7 +122,7 @@ class Video(BaseMedia):
         publish_date = html.unescape(script.get("uploadDate"))
         length = html.unescape(script.get("duration"))
         views = script.get("interactionStatistic").get("userInteractionCount")
-        author = parser.css_first("div.video-title-container").css_first("a.gold-plate").text(strip=True)
+        author = get_text_safe(parser, "div.video-title-container a.gold-plate") or get_text_safe(parser, "div.video-title-container a")
         tags = [tag.text(strip=True) for tag in parser.css("a.is-keyword")]
 
         m3u8_base_url = REGEX_EXTRACT_M3U8_URL.search(html_content).group(1)
@@ -225,25 +197,27 @@ class User(BaseMedia):
             self.logger.warning(f"You are trying to fetch more pages than there are... Reducing to: {total_pages_count}")
             pages = int(total_pages_count)
 
-        helper = Helper(core=self.core, constructor=Video)
         page_urls = [f"{self.url}/videos/best/{page}" for page in range(pages)]
         logger.debug(f"Iterating through pages: {page_urls}")
         if iterator_config is None:
             iterator_config = make_iterator_config()
 
-        stream = helper.iterator(
+        stream = scrape_stream(
+            core=self.core,
+            constructor=Video,
             target_page_urls=page_urls,
             item_extractor=extractor_html,
             iterator_config=iterator_config,
         )
-        async with stream:
-            async for result in stream:
-                logger.debug("Received Result: %s", result.succeeded)
-                yield result
+        async for result in stream:
+            logger.debug("Received Result: %s", result.succeeded)
+            yield result
 
 
 class Client:
-    def __init__(self, core: BaseCore = BaseCore()):
+    def __init__(self, core: BaseCore | None = None):
+        if core is None:
+            core = BaseCore()
         self.core = core
         self.core.initialize_session()
         assert isinstance(self.core.session, AsyncSession)
@@ -275,7 +249,7 @@ class Client:
         return user
 
 
-    async def search_videos(self, query: str, pages: int = 0,
+    def search_videos(self, query: str, pages: int = 0,
                      mode: Mode | str = "",
                      upload_time: UploadTime | str = "",
                      length: Length | str = "",
@@ -284,53 +258,69 @@ class Client:
                      ) -> AsyncGenerator[ScrapeResult[Video], None]:
         url = f"https://www.xnxx.com/search{mode}{upload_time}{length}{searching_quality}/{query}"
 
-        helper = Helper(core=self.core, constructor=Video)
         page_urls = [url]
         page_urls.extend([f"{url}/{page}" for page in range(1, int(pages))])
         logger.info(f"Searching for videos using query: {query} and page URLs: {page_urls}")
         if iterator_config is None:
             iterator_config = make_iterator_config()
 
-        stream = helper.iterator(
+        return scrape_stream(
+            core=self.core,
+            constructor=Video,
             target_page_urls=page_urls,
             item_extractor=extractor_html,
             iterator_config=iterator_config,
         )
-        async with stream:
-            async for result in stream:
-                logger.debug("Returning result: %s", result.succeeded)
-                yield result
 
 
-async def main():
-    parser = argparse.ArgumentParser(description="API Command Line Interface")
-    parser.add_argument("--download", metavar="URL (str)", type=str, help="URL to download from")
-    parser.add_argument("--quality", metavar="best,half,worst", type=str, help="The video quality (best,half,worst)", required=True)
-    parser.add_argument("--file", metavar="Source to .txt file", type=str, help="(Optional) Specify a file with URLs (separated with new lines)")
-    parser.add_argument("--output", metavar="Output directory", type=str, help="The output path (with filename)", required=True)
-    parser.add_argument("--no-title", metavar="True,False", type=str, help="Whether to apply video title automatically to output path or not", required=True)
+def create_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="XNXX API Command Line Interface")
+    parser.add_argument("--download", metavar="URL", type=str, help="URL to download from")
+    parser.add_argument("--quality", metavar="best|half|worst", type=str, default="best", help="The video quality (best, half, worst)")
+    parser.add_argument("--file", metavar="FILE", type=str, help="(Optional) Specify a file with URLs (separated with new lines)")
+    parser.add_argument("--output", metavar="DIR", type=str, required=True, help="The output path (with filename or directory)")
+    parser.add_argument("--no-title", metavar="True,False", type=str, nargs="?", const="True", default="False",
+                        help="Whether to apply video title automatically to output path or not")
+    return parser
 
-    args = parser.parse_args()
-    no_title = str_to_bool(args.no_title)
+
+async def run_main(args_list: list[str] | None = None):
+    parser = create_parser()
+    args = parser.parse_args(args_list)
+    no_title = str_to_bool(args.no_title) if isinstance(args.no_title, str) else bool(args.no_title)
     config = DownloadConfigHLS(quality=args.quality, path=args.output, no_title=no_title)
+
+    urls: list[str] = []
     if args.download:
-        client = Client()
-        video = await client.get_video(args.download)
-        await video.download(config)
-
+        urls.append(args.download)
     if args.file:
-        videos = []
-        client = Client()
-
         with open(args.file, "r") as file:
-            content = file.read().splitlines()
+            urls.extend([line.strip() for line in file.readlines() if line.strip()])
 
-        for url in content:
-            videos.append(await client.get_video(url))
+    if not urls:
+        parser.print_help()
+        return
 
-        for video in videos:
+    client = Client()
+    for url in urls:
+        print(f"Fetching video information for: {url}")
+        try:
+            video = await client.get_video(url, load_html=True)
+            title = getattr(video, "title", None) or url
+            print(f"Starting download for: {title}")
             await video.download(config)
+            print(f"Download complete: {title}")
+        except Exception as e:
+            print(f"Error downloading {url}: {e}")
+
+
+def main():
+    try:
+        asyncio.run(run_main())
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+
