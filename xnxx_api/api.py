@@ -7,6 +7,8 @@ import logging
 import asyncio
 import argparse
 
+from base_api.modules.logger import configure_app_logging
+
 from typing import AsyncGenerator, ClassVar
 from dataclasses import dataclass
 from curl_cffi import AsyncSession
@@ -34,6 +36,7 @@ from base_api import (
     get_text_safe,
 )
 from base_api.modules.errors import (
+    DownloadCancelled,
     AccessDeniedError,
     BotProtectionDetected,
     HTTPStatusError,
@@ -45,7 +48,7 @@ from base_api.modules.errors import (
 )
 
 from xnxx_api.modules.errors import (NetworkError, ProxyError, UnknownNetworkError, BotDetection, RegionBlocked,
-                                     DownloadFailed)
+                                     DownloadFailed, NotFound)
 from xnxx_api.modules.consts import headers, REGEX_MODEL_TOTAL_VIDEO_VIEWS, extractor_html, REGEX_EXTRACT_M3U8_URL
 from xnxx_api.modules.search_filters import SearchingQuality, Mode, Length, UploadTime
 
@@ -63,21 +66,35 @@ async def get_html_content(core: BaseCore, url: str) -> str:
     try:
         return await core.fetch_text(url)
 
-    except (AccessDeniedError, HTTPStatusError) as e:
-        logger.error("Region Blocked: Video %s is not available", url)
-        raise RegionBlocked(f"The Video: {url} is not available in your country!") from e
+    except AccessDeniedError as e:
+        logger.exception("Request failed for %s: %s", url, e)
+        raise RegionBlocked(f"Access denied for {url}: {e}") from e
+
+    except HTTPStatusError as e:
+        logger.exception("Request failed for %s (HTTP %s): %s", url, e.status_code, e)
+        if e.status_code == 404:
+            raise NotFound(f"Server returned 404 for: {url}") from e
+        raise NetworkError(f"Request failed for {url}: {e}") from e
 
     except (NetworkRequestError, RequestRetriesExhausted) as e:
-        raise NetworkError(str(e)) from e
+        logger.exception("Request failed for %s: %s", url, e)
+        raise NetworkError(f"Request failed for {url}: {e}") from e
 
     except InvalidProxy as e:
-        raise ProxyError(str(e)) from e
+        logger.exception("Request failed for %s: %s", url, e)
+        raise ProxyError(f"Request failed for {url}: {e}") from e
 
     except BotProtectionDetected as e:
-        raise BotDetection(str(e)) from e
+        logger.exception("Request failed for %s: %s", url, e)
+        raise BotDetection(f"Request failed for {url}: {e}") from e
 
     except UnknownError as e:
-        raise UnknownNetworkError(str(e)) from e
+        logger.exception("Request failed for %s: %s", url, e)
+        raise UnknownNetworkError(f"Request failed for {url}: {e}") from e
+
+    except Exception:
+        logger.exception("Failed to fetch or decode response for %s", url)
+        raise
 
 
 
@@ -141,16 +158,19 @@ class Video(BaseMedia):
         }
 
     async def download(self, configuration: DownloadConfigHLS) -> bool | DownloadReport:
-        await self.load_fields("m3u8_base_url", "title")
-        config = copy.deepcopy(configuration)
-        config.m3u8_base_url = self.m3u8_base_url
-        if not config.no_title:
-            config.path = os.path.join(config.path, f"{self.title}.mp4")
-
         try:
+            await self.load_fields("m3u8_base_url", "title")
+            config = copy.deepcopy(configuration)
+            config.m3u8_base_url = self.m3u8_base_url
+            if not config.no_title:
+                config.path = os.path.join(config.path, f"{self.title}.mp4")
+
             return await self.core.download(configuration=config)
+        except DownloadCancelled:
+            raise
         except Exception as e:
-            raise DownloadFailed(str(e))
+            logger.exception("Download failed for %s: %s", self.url, e)
+            raise DownloadFailed(f"Download failed for {self.url}: {e}") from e
 
 
 @dataclass(kw_only=True, slots=True)
@@ -311,10 +331,12 @@ async def run_main(args_list: list[str] | None = None):
             await video.download(config)
             print(f"Download complete: {title}")
         except Exception as e:
+            logger.exception("CLI failed while processing %s", url)
             print(f"Error downloading {url}: {e}")
 
 
 def main():
+    configure_app_logging(level=logging.INFO)
     try:
         asyncio.run(run_main())
     except KeyboardInterrupt:
@@ -323,4 +345,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

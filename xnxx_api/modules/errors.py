@@ -1,4 +1,5 @@
 from base_api.modules.errors import (
+    ScraperException,
     NotFound,
     NetworkError,
     BotDetection,
@@ -8,7 +9,7 @@ from base_api.modules.errors import (
 )
 
 
-class RegionBlocked(Exception):
+class RegionBlocked(ScraperException):
     def __init__(self, msg):
         super().__init__(msg)
         self.msg = msg
