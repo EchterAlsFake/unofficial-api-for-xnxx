@@ -1,4 +1,5 @@
 import os
+import re
 import html
 import json
 import math
@@ -20,13 +21,7 @@ from base_api import (
     BaseCore,
     BaseMedia,
     DownloadConfigHLS,
-    ErrorAction,
-    ErrorMode,
-    Helper,
-    MediaLoadError,
-    MediaLoadErrors,
     RetryPolicy,
-    ScrapeErrorContext,
     ScrapeResult,
     media_field,
     make_iterator_config,
@@ -43,7 +38,6 @@ from base_api.modules.errors import (
     InvalidProxy,
     NetworkRequestError,
     RequestRetriesExhausted,
-    ResourceGone,
     UnknownError,
 )
 
@@ -125,36 +119,145 @@ class Video(BaseMedia):
         html_content = await get_html_content(core=self.core, url=self.url)
         return await asyncio.to_thread(self._extract_html, html_content)
 
-    @staticmethod
-    def _extract_html(html_content: str) -> dict:
-        logger.debug("Starting data extraction")
-        parser = LexborHTMLParser(html_content)
+    def _extract_html(self, html_content: str | None = None) -> dict[str, object]:
+        if isinstance(self, str):
+            content = self
+            url = "unknown"
+        else:
+            content = html_content or ""
+            url = getattr(self, "url", "unknown")
 
-        _script = parser.css_first('script[type="application/ld+json"]')
-        script: dict = json.loads(_script.text())
+        logger.debug("Starting data extraction for %s", url)
+        parser = LexborHTMLParser(content)
 
-        title = html.unescape(script.get("name"))
-        description = html.unescape(script.get("description"))
-        thumbnail_url = html.unescape(script.get("thumbnailUrl")[0])
-        publish_date = html.unescape(script.get("uploadDate"))
-        length = html.unescape(script.get("duration"))
-        views = script.get("interactionStatistic").get("userInteractionCount")
+        # Layout anchors: '#video-content' or '#html5video' are expected on all video pages
+        if not parser.css_first("#video-content") and not parser.css_first("#html5video"):
+            logger.warning(
+                "Video container anchor ('#video-content' / '#html5video') not found for %s; page layout may have changed.",
+                url,
+            )
+
+        script_data: dict = {}
+        if script_node := parser.css_first('script[type="application/ld+json"]'):
+            try:
+                raw_json = script_node.text()
+                if raw_json:
+                    script_data = json.loads(raw_json)
+            except Exception as e:
+                logger.warning("Failed to parse application/ld+json for %s: %s", url, e)
+
+        # 1. Title
+        title = script_data.get("name")
+        if not title:
+            if strong_node := (parser.css_first("div.video-title strong") or parser.css_first(".video-title strong")):
+                title = strong_node.text(strip=True)
+            elif title_node := parser.css_first("div.video-title"):
+                title = title_node.text(strip=True).replace("...", "").strip()
+            elif m_title := re.search(r"html5player\.setVideoTitle\(['\"]([^'\"]+)['\"]\)", content):
+                title = m_title.group(1)
+        if title:
+            title = html.unescape(title).strip()
+        else:
+            logger.warning("Title not found for %s", url)
+
+        # 2. Description
+        description = script_data.get("description")
+        if not description:
+            desc_node = parser.css_first("meta[name='description']") or parser.css_first("meta[property='og:description']")
+            if desc_node and (c := desc_node.attributes.get("content")):
+                description = c.strip()
+        if description:
+            description = html.unescape(description).strip()
+        else:
+            logger.warning("Description not found for %s", url)
+
+        # 3. Thumbnail
+        thumbnail = None
+        raw_thumb = script_data.get("thumbnailUrl")
+        if isinstance(raw_thumb, list) and raw_thumb:
+            thumbnail = raw_thumb[0]
+        elif isinstance(raw_thumb, str):
+            thumbnail = raw_thumb
+        if not thumbnail:
+            if m_thumb := re.search(r"html5player\.setThumbUrl(?:169)?\(['\"]([^'\"]+)['\"]\)", content):
+                thumbnail = m_thumb.group(1)
+            elif img_node := parser.css_first("div.video-pic img"):
+                thumbnail = img_node.attributes.get("src")
+        if thumbnail:
+            thumbnail = html.unescape(thumbnail).strip()
+        else:
+            logger.warning("Thumbnail not found for %s", url)
+
+        # 4. Publish Date
+        publish_date = script_data.get("uploadDate")
+        if not publish_date:
+            if m_date := re.search(r"<!--\s*dispo\s*-\s*([^>]+?)\s+Loaded\s*!", content):
+                publish_date = m_date.group(1).strip()
+        if publish_date:
+            publish_date = html.unescape(str(publish_date)).strip()
+        else:
+            logger.warning("Publish date not found for %s", url)
+
+        # 5. Length
+        length = script_data.get("duration")
+        if not length:
+            meta_node = parser.css_first("div.video-title-container span.metadata") or parser.css_first("span.metadata")
+            if meta_node and (m_len := re.search(r"(\d+\s*min)", meta_node.text(separator=" ", strip=True))):
+                length = m_len.group(1).replace(" ", "")
+            elif prog_node := parser.css_first(".progress-text"):
+                if "/" in prog_node.text():
+                    length = prog_node.text().split("/")[-1].strip()
+        if length:
+            length = html.unescape(str(length)).strip()
+        else:
+            logger.warning("Length not found for %s", url)
+
+        # 6. m3u8 base URL
+        m3u8_match = REGEX_EXTRACT_M3U8_URL.search(content)
+        m3u8_base_url = m3u8_match.group(1) if m3u8_match else None
+        if not m3u8_base_url:
+            logger.warning("m3u8 base URL not found for %s", url)
+
+        # 7. Views
+        views = None
+        stat = script_data.get("interactionStatistic")
+        if isinstance(stat, dict):
+            views = stat.get("userInteractionCount")
+        elif isinstance(stat, list) and stat and isinstance(stat[0], dict):
+            views = stat[0].get("userInteractionCount")
+        if views is not None:
+            views = str(views)
+        else:
+            logger.warning("Views not found for %s", url)
+
+        # 8. Author
         author = get_text_safe(parser, "div.video-title-container a.gold-plate") or get_text_safe(parser, "div.video-title-container a")
-        tags = [tag.text(strip=True) for tag in parser.css("a.is-keyword")]
+        if not author and (m_auth := re.search(r"html5player\.setUploaderName\(['\"]([^'\"]+)['\"]\)", content)):
+            author = m_auth.group(1)
+        if author:
+            author = html.unescape(author).strip()
+        else:
+            logger.warning("Author not found for %s", url)
 
-        m3u8_base_url = REGEX_EXTRACT_M3U8_URL.search(html_content).group(1)
+        # 9. Tags
+        tags = [tag.text(strip=True) for tag in parser.css("a.is-keyword") if tag.text(strip=True)]
+        if not tags:
+            if m_cats := re.search(r'window\.wpn_categories\s*=\s*["\']([^"\']+)["\']', content):
+                tags = [c.strip() for c in m_cats.group(1).split(",") if c.strip()]
+        if not tags:
+            logger.warning("Tags not found for %s", url)
 
-        logger.info("Successfully parsed data")
+        logger.info("Successfully parsed data for %s", url)
         return {
             "title": title,
             "description": description,
-            "thumbnail": thumbnail_url,
+            "thumbnail": thumbnail,
             "publish_date": publish_date,
             "length": length,
             "m3u8_base_url": m3u8_base_url,
             "views": views,
             "author": author,
-            "tags": tags
+            "tags": tags,
         }
 
     async def download(self, configuration: DownloadConfigHLS) -> bool | DownloadReport:
@@ -214,7 +317,6 @@ class User(BaseMedia):
 
         total_pages_count = await self.get_field("total_pages_count")
         if pages >= total_pages_count:
-            self.logger.warning(f"You are trying to fetch more pages than there are... Reducing to: {total_pages_count}")
             pages = int(total_pages_count)
 
         page_urls = [f"{self.url}/videos/best/{page}" for page in range(pages)]
