@@ -1,14 +1,14 @@
-import os
 import re
 import html
 import json
 import math
-import copy
 import logging
 import asyncio
 import argparse
 
-from base_api.modules.logger import configure_app_logging
+from xnxx_api.modules import errors as provider_errors
+from base_api.modules.provider import fetch_content, download_errors, download_hls
+from base_api.modules.logger import configure_app_logging, get_logger
 
 from typing import AsyncGenerator, ClassVar
 from dataclasses import dataclass
@@ -30,16 +30,6 @@ from base_api import (
     scrape_stream,
     get_text_safe,
 )
-from base_api.modules.errors import (
-    DownloadCancelled,
-    AccessDeniedError,
-    BotProtectionDetected,
-    HTTPStatusError,
-    InvalidProxy,
-    NetworkRequestError,
-    RequestRetriesExhausted,
-    UnknownError,
-)
 
 from xnxx_api.modules.errors import (NetworkError, ProxyError, UnknownNetworkError, BotDetection, RegionBlocked,
                                      DownloadFailed, NotFound)
@@ -47,8 +37,7 @@ from xnxx_api.modules.consts import headers, REGEX_MODEL_TOTAL_VIDEO_VIEWS, extr
 from xnxx_api.modules.search_filters import SearchingQuality, Mode, Length, UploadTime
 
 
-logger = logging.getLogger(__name__)
-logger.addHandler(logging.NullHandler())
+logger = get_logger(__name__)
 
 SCRAPE_RETRY_POLICY = RetryPolicy(max_attempts=3)
 
@@ -56,39 +45,9 @@ _is_resource_gone = is_resource_gone
 on_error = default_on_error
 
 
-async def get_html_content(core: BaseCore, url: str) -> str:
-    try:
-        return await core.fetch_text(url)
-
-    except AccessDeniedError as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        raise RegionBlocked(f"Access denied for {url}: {e}") from e
-
-    except HTTPStatusError as e:
-        logger.exception("Request failed for %s (HTTP %s): %s", url, e.status_code, e)
-        if e.status_code == 404:
-            raise NotFound(f"Server returned 404 for: {url}") from e
-        raise NetworkError(f"Request failed for {url}: {e}") from e
-
-    except (NetworkRequestError, RequestRetriesExhausted) as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        raise NetworkError(f"Request failed for {url}: {e}") from e
-
-    except InvalidProxy as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        raise ProxyError(f"Request failed for {url}: {e}") from e
-
-    except BotProtectionDetected as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        raise BotDetection(f"Request failed for {url}: {e}") from e
-
-    except UnknownError as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        raise UnknownNetworkError(f"Request failed for {url}: {e}") from e
-
-    except Exception:
-        logger.exception("Failed to fetch or decode response for %s", url)
-        raise
+async def get_html_content(core: BaseCore, url: str, *, owner=None) -> str:
+    return await fetch_content(core, url, logger=logger, owner=owner,
+                               error_types=provider_errors, access_denied_error=RegionBlocked)
 
 
 
@@ -116,7 +75,7 @@ class Video(BaseMedia):
     loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
 
     async def _load_html(self) -> dict[str, object]:
-        html_content = await get_html_content(core=self.core, url=self.url)
+        html_content = await get_html_content(core=self.core, url=self.url, owner=self)
         return await asyncio.to_thread(self._extract_html, html_content)
 
     def _extract_html(self, html_content: str | None = None) -> dict[str, object]:
@@ -144,7 +103,7 @@ class Video(BaseMedia):
                 if raw_json:
                     script_data = json.loads(raw_json)
             except Exception as e:
-                logger.warning("Failed to parse application/ld+json for %s: %s", url, e)
+                logger.warning("Failed to parse application/ld+json for %s: %s", url, e, exc_info=True)
 
         # 1. Title
         title = script_data.get("name")
@@ -260,20 +219,9 @@ class Video(BaseMedia):
             "tags": tags,
         }
 
+    @download_errors(DownloadFailed)
     async def download(self, configuration: DownloadConfigHLS) -> bool | DownloadReport:
-        try:
-            await self.load_fields("m3u8_base_url", "title")
-            config = copy.deepcopy(configuration)
-            config.m3u8_base_url = self.m3u8_base_url
-            if not config.no_title:
-                config.path = os.path.join(config.path, f"{self.title}.mp4")
-
-            return await self.core.download(configuration=config)
-        except DownloadCancelled:
-            raise
-        except Exception as e:
-            logger.exception("Download failed for %s: %s", self.url, e)
-            raise DownloadFailed(f"Download failed for {self.url}: {e}") from e
+        return await download_hls(self, configuration)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -287,8 +235,8 @@ class User(BaseMedia):
     loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
 
     async def _load_html(self) -> dict[str, object]:
-        html_content_task = asyncio.create_task(get_html_content(core=self.core, url=self.url))
-        base_json_task = asyncio.create_task(get_html_content(core=self.core, url=f"{self.url}/videos/best/0"))
+        html_content_task = asyncio.create_task(get_html_content(core=self.core, url=self.url, owner=self))
+        base_json_task = asyncio.create_task(get_html_content(core=self.core, url=f"{self.url}/videos/best/0", owner=self))
         html_content, base_json = await asyncio.gather(html_content_task, base_json_task)
 
         return await asyncio.to_thread(self._extract_data, html_content, base_json)
