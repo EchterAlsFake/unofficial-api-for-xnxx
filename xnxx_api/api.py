@@ -1,4 +1,5 @@
 import re
+from functools import partial
 import html
 import json
 import math
@@ -7,6 +8,7 @@ import asyncio
 import argparse
 
 from xnxx_api.modules import errors as provider_errors
+from base_api import append_url_path, profile_base_url
 from base_api.modules.provider import fetch_content, download_errors, download_hls
 from base_api.modules.logger import configure_app_logging, get_logger
 
@@ -33,6 +35,7 @@ from base_api import (
 
 from xnxx_api.modules.errors import (NetworkError, ProxyError, UnknownNetworkError, BotDetection, RegionBlocked,
                                      DownloadFailed, NotFound)
+from xnxx_api.modules.consts import extractor_profile_json
 from xnxx_api.modules.consts import headers, REGEX_MODEL_TOTAL_VIDEO_VIEWS, extractor_html, REGEX_EXTRACT_M3U8_URL
 from xnxx_api.modules.search_filters import SearchingQuality, Mode, Length, UploadTime
 
@@ -226,6 +229,10 @@ class Video(BaseMedia):
 
 @dataclass(kw_only=True, slots=True)
 class User(BaseMedia):
+
+    def __post_init__(self):
+        profile_base_url(self.url, depth=2)
+
     url: str
     core: BaseCore
     total_videos_count: int | None = media_field("html")
@@ -235,9 +242,10 @@ class User(BaseMedia):
     loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
 
     async def _load_html(self) -> dict[str, object]:
-        html_content_task = asyncio.create_task(get_html_content(core=self.core, url=self.url, owner=self))
-        base_json_task = asyncio.create_task(get_html_content(core=self.core, url=f"{self.url}/videos/best/0", owner=self))
-        html_content, base_json = await asyncio.gather(html_content_task, base_json_task)
+        self.url = profile_base_url(self.url)
+        html_content = await get_html_content(core=self.core, url=self.url, owner=self)
+        base_url = profile_base_url(self.resolved_url or self.url)
+        base_json = await get_html_content(core=self.core, url=append_url_path(base_url, "videos", "best", 0), owner=self)
 
         return await asyncio.to_thread(self._extract_data, html_content, base_json)
 
@@ -249,7 +257,16 @@ class User(BaseMedia):
 
         _per_page = int(json_data.get("nb_per_page"))
         total_pages_count = int(math.ceil(total_videos_count / _per_page))
-        total_videos_views = REGEX_MODEL_TOTAL_VIDEO_VIEWS.search(html_content).group(1)
+        match = REGEX_MODEL_TOTAL_VIDEO_VIEWS.search(html_content)
+        if match:
+            total_videos_views = match.group(1)
+        else:
+            # View labels are translated; retain the count independently of the label.
+            parser = LexborHTMLParser(html_content)
+            eye = parser.css_first(".icf-eye")
+            text = eye.parent.text(strip=True) if eye and eye.parent else ""
+            count = re.search(r"[\d.,]+(?:\s*[kKmMbB])?", text)
+            total_videos_views = count.group(0) if count else None
         logger.info("Successfully parsed data")
         return {
             "total_videos_count": total_videos_count,
@@ -264,10 +281,11 @@ class User(BaseMedia):
     ) -> AsyncGenerator[ScrapeResult[Video], None]:
 
         total_pages_count = await self.get_field("total_pages_count")
-        if pages >= total_pages_count:
+        if pages == 0 or pages >= total_pages_count:
             pages = int(total_pages_count)
 
-        page_urls = [f"{self.url}/videos/best/{page}" for page in range(pages)]
+        base_url = profile_base_url(self.resolved_url or self.url)
+        page_urls = [append_url_path(base_url, "videos", "best", page) for page in range(pages)]
         logger.debug(f"Iterating through pages: {page_urls}")
         if iterator_config is None:
             iterator_config = make_iterator_config()
@@ -276,7 +294,7 @@ class User(BaseMedia):
             core=self.core,
             constructor=Video,
             target_page_urls=page_urls,
-            item_extractor=extractor_html,
+            item_extractor=partial(extractor_profile_json, base_url=base_url),
             iterator_config=iterator_config,
         )
         async for result in stream:

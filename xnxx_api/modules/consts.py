@@ -1,3 +1,6 @@
+import json
+from urllib.parse import urljoin, urlsplit, urlunsplit
+
 import re
 from selectolax.lexbor import LexborHTMLParser
 # ROOT URLs
@@ -13,7 +16,38 @@ headers = {
 }
 
 
-def extractor_html(content: str) -> list[dict]:
+def extractor_profile_json(content: str, base_url: str = "https://www.xnxx.com") -> list[dict]:
+    data = json.loads(content)
+    videos = data.get("videos", [])
+    if not isinstance(videos, list):
+        raise ValueError("Profile listing did not contain a videos array")
+    results = []
+    for item in videos:
+        if not isinstance(item, dict) or not item.get("u"):
+            continue
+        url = urljoin(base_url, item["u"])
+        parsed = urlsplit(url)
+        parts = parsed.path.strip("/").split("/")
+        # XNXX click URLs contain a tracking ID; eid identifies the canonical video.
+        if parts[0] == "prof-video-click":
+            if len(parts) < 5:
+                continue
+            video_key = item.get("eid")
+            if not isinstance(video_key, str) or not video_key:
+                continue
+            url = urlunsplit(parsed._replace(path="/video-" + video_key + "/" + parts[-1], fragment=""))
+        results.append({
+            "url": url,
+            "video_id": str(item["id"]) if item.get("id") is not None else None,
+            "title": item.get("tf") or item.get("t"),
+            "thumbnail": item.get("i"),
+            "length": item.get("d"),
+            "views": str(item["n"]) if item.get("n") is not None else None,
+        })
+    return results
+
+
+def extractor_html(content: str, base_url: str = "https://www.xnxx.com") -> list[dict]:
     parser = LexborHTMLParser(content)
     extracted_videos = []
 
@@ -33,7 +67,7 @@ def extractor_html(content: str) -> list[dict]:
         # Extract URL and Title
         a_tag = video_node.css_first('.thumb-under p a')
         if a_tag:
-            video_data["url"] = f"https://xnxx.com{a_tag.attributes.get("href")}"
+            video_data["url"] = urljoin(base_url, a_tag.attributes.get("href") or "")
             video_data["title"] = a_tag.attributes.get("title") or a_tag.text(strip=True)
 
         if not isinstance(video_data["url"], str) or not video_data["url"]:
