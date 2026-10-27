@@ -1,11 +1,13 @@
 import re
 from functools import partial
+from contextlib import aclosing
 import html
 import json
 import math
 import logging
 import asyncio
 import argparse
+from urllib.parse import quote
 
 from xnxx_api.modules import errors as provider_errors
 from base_api import append_url_path, profile_base_url
@@ -17,7 +19,7 @@ from dataclasses import dataclass
 from curl_cffi import AsyncSession
 from selectolax.lexbor import LexborHTMLParser
 from base_api.modules.type_hints import DownloadReport
-from base_api.modules.config import IteratorConfig
+from base_api.modules.config import IteratorConfig, RuntimeConfig
 from base_api.modules.static_functions import str_to_bool
 from base_api import (
     BaseCore,
@@ -100,11 +102,26 @@ class Video(BaseMedia):
             )
 
         script_data: dict = {}
-        if script_node := parser.css_first('script[type="application/ld+json"]'):
+        for script_node in parser.css('script[type="application/ld+json"]'):
             try:
                 raw_json = script_node.text()
                 if raw_json:
-                    script_data = json.loads(raw_json)
+                    data = json.loads(raw_json)
+                    candidates = data if isinstance(data, list) else [data]
+                    for item in candidates:
+                        if not isinstance(item, dict):
+                            continue
+                        for candidate in [item, *item.get("@graph", [])]:
+                            if isinstance(candidate, dict) and "VideoObject" in (
+                                candidate.get("@type") if isinstance(candidate.get("@type"), list)
+                                else [candidate.get("@type")]
+                            ):
+                                script_data = candidate
+                                break
+                        if script_data:
+                            break
+                    if script_data:
+                        break
             except Exception as e:
                 logger.warning("Failed to parse application/ld+json for %s: %s", url, e, exc_info=True)
 
@@ -255,7 +272,7 @@ class User(BaseMedia):
         json_data = json.loads(base_json, strict=False)
         total_videos_count = int(json_data["nb_videos"])
 
-        _per_page = int(json_data.get("nb_per_page"))
+        _per_page = int(json_data.get("nb_per_page") or 36)
         total_pages_count = int(math.ceil(total_videos_count / _per_page))
         match = REGEX_MODEL_TOTAL_VIDEO_VIEWS.search(html_content)
         if match:
@@ -297,9 +314,10 @@ class User(BaseMedia):
             item_extractor=partial(extractor_profile_json, base_url=base_url),
             iterator_config=iterator_config,
         )
-        async for result in stream:
-            logger.debug("Received Result: %s", result.succeeded)
-            yield result
+        async with aclosing(stream):
+            async for result in stream:
+                logger.debug("Received Result: %s", result.succeeded)
+                yield result
 
 
 class Client:
@@ -344,7 +362,7 @@ class Client:
                      searching_quality: SearchingQuality | str = "",
                      iterator_config: IteratorConfig | None = None,
                      ) -> AsyncGenerator[ScrapeResult[Video], None]:
-        url = f"https://www.xnxx.com/search{mode}{upload_time}{length}{searching_quality}/{query}"
+        url = f"https://www.xnxx.com/search{mode}{upload_time}{length}{searching_quality}/{quote(query, safe='')}"
 
         page_urls = [url]
         page_urls.extend([f"{url}/{page}" for page in range(1, int(pages))])
@@ -389,18 +407,21 @@ async def run_main(args_list: list[str] | None = None):
         parser.print_help()
         return
 
-    client = Client()
-    for url in urls:
-        print(f"Fetching video information for: {url}")
-        try:
-            video = await client.get_video(url, load_html=True)
-            title = getattr(video, "title", None) or url
-            print(f"Starting download for: {title}")
-            await video.download(config)
-            print(f"Download complete: {title}")
-        except Exception as e:
-            logger.exception("CLI failed while processing %s", url)
-            print(f"Error downloading {url}: {e}")
+    async with BaseCore(RuntimeConfig()) as core:
+        client = Client(core=core)
+        for url in urls:
+            print(f"Fetching video information for: {url}")
+            try:
+                video = await client.get_video(url, load_html=True)
+                title = getattr(video, "title", None) or url
+                print(f"Starting download for: {title}")
+                result = await video.download(config)
+                if result is False or getattr(result, "status", None) == "failed":
+                    raise DownloadFailed("Download did not complete")
+                print(f"Download complete: {title}")
+            except Exception as e:
+                logger.exception("CLI failed while processing %s", url)
+                print(f"Error downloading {url}: {e}")
 
 
 def main():
