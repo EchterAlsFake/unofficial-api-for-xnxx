@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.4.5 - 2026-11-14
+
+- Qualify structured upload dates and stop exposing page-comment timestamps as publication dates.
+
 ## 2.4.4 — 2026-10-27
 
 - Encode search terms as one path segment, including literal slashes and hashes.

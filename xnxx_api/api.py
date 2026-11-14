@@ -64,6 +64,7 @@ class Video(BaseMedia):
     description: str | None = media_field("html")
     thumbnail: str | None = media_field("html")
     publish_date: str | None = media_field("html")
+    publish_date_source: str | None = media_field("html")
     length: str | None = media_field("html")
     m3u8_base_url: str | None = media_field("html")
     views: str | None = media_field("html")
@@ -169,9 +170,6 @@ class Video(BaseMedia):
 
         # 4. Publish Date
         publish_date = script_data.get("uploadDate")
-        if not publish_date:
-            if m_date := re.search(r"<!--\s*dispo\s*-\s*([^>]+?)\s+Loaded\s*!", content):
-                publish_date = m_date.group(1).strip()
         if publish_date:
             publish_date = html.unescape(str(publish_date)).strip()
         else:
@@ -232,6 +230,7 @@ class Video(BaseMedia):
             "description": description,
             "thumbnail": thumbnail,
             "publish_date": publish_date,
+            "publish_date_source": "uploadDate" if publish_date else None,
             "length": length,
             "m3u8_base_url": m3u8_base_url,
             "views": views,
