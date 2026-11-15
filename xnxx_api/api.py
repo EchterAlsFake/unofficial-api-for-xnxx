@@ -1,3 +1,5 @@
+from base_api import paginated_stream, PageInfo, validate_pagination
+from base_api.modules.pagination import linked_page
 import re
 from functools import partial
 from contextlib import aclosing
@@ -290,33 +292,32 @@ class User(BaseMedia):
             "total_videos_views": total_videos_views,
         }
 
-    async def videos(
+    def videos(
         self,
-        pages: int = 0,
+        pages: int | str = 1,
         iterator_config: IteratorConfig | None = None,
+        *,
+        start_page: int = 1,
     ) -> AsyncGenerator[ScrapeResult[Video], None]:
-
-        total_pages_count = await self.get_field("total_pages_count")
-        if pages == 0 or pages >= total_pages_count:
-            pages = int(total_pages_count)
-
+        validate_pagination(pages, start_page)
         base_url = profile_base_url(self.resolved_url or self.url)
-        page_urls = [append_url_path(base_url, "videos", "best", page) for page in range(pages)]
-        logger.debug(f"Iterating through pages: {page_urls}")
+        page_url = lambda page: append_url_path(base_url, "videos", "best", page - 1)
+        logger.debug("Starting paginated profile listing")
         if iterator_config is None:
             iterator_config = make_iterator_config()
-
-        stream = scrape_stream(
+        stream = paginated_stream(
             core=self.core,
             constructor=Video,
-            target_page_urls=page_urls,
             item_extractor=partial(extractor_profile_json, base_url=base_url),
             iterator_config=iterator_config,
+            page_url=page_url,
+            pages=pages,
+            start_page=start_page,
+            page_info=lambda content, page, rows: _pagination_info(
+                content, page, rows, page_url=page_url
+            ),
         )
-        async with aclosing(stream):
-            async for result in stream:
-                logger.debug("Received Result: %s", result.succeeded)
-                yield result
+        return stream
 
 
 class Client:
@@ -353,29 +354,49 @@ class Client:
             await user.load_sources("html")
         return user
 
-
-    def search_videos(self, query: str, pages: int = 0,
-                     mode: Mode | str = "",
-                     upload_time: UploadTime | str = "",
-                     length: Length | str = "",
-                     searching_quality: SearchingQuality | str = "",
-                     iterator_config: IteratorConfig | None = None,
-                     ) -> AsyncGenerator[ScrapeResult[Video], None]:
+    def search_videos(
+        self,
+        query: str,
+        pages: int | str = 1,
+        mode: Mode | str = "",
+        upload_time: UploadTime | str = "",
+        length: Length | str = "",
+        searching_quality: SearchingQuality | str = "",
+        iterator_config=None,
+        *,
+        start_page=1,
+    ):
+        validate_pagination(pages, start_page)
         url = f"https://www.xnxx.com/search{mode}{upload_time}{length}{searching_quality}/{quote(query, safe='')}"
-
-        page_urls = [url]
-        page_urls.extend([f"{url}/{page}" for page in range(1, int(pages))])
-        logger.info(f"Searching for videos using query: {query} and page URLs: {page_urls}")
-        if iterator_config is None:
-            iterator_config = make_iterator_config()
-
-        return scrape_stream(
+        page_url = lambda page: url if page == 1 else append_url_path(url, page - 1)
+        return paginated_stream(
             core=self.core,
             constructor=Video,
-            target_page_urls=page_urls,
+            page_url=page_url,
             item_extractor=extractor_html,
+            pages=pages,
+            start_page=start_page,
+            page_info=lambda content, page, rows: _pagination_info(
+                content, page, rows, page_url=page_url
+            ),
             iterator_config=iterator_config,
         )
+
+
+def _pagination_info(content, page, rows, *, page_url):
+    if str(content).lstrip().startswith("{"):
+        data = json.loads(content)
+        if data.get("result") is False and data.get("code") == 404 and page > 1:
+            return PageInfo(terminal=True)
+        size = int(data["nb_per_page"])
+        if size < 1:
+            raise ValueError("Invalid profile page size")
+        return PageInfo(
+            current_page=int(data["current_page"]) + 1,
+            total_pages=math.ceil(int(data["nb_videos"]) / size),
+            terminal=not rows,
+        )
+    return linked_page(content, page, rows, page_url=page_url)
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -433,3 +454,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

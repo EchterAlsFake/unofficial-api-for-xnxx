@@ -1,3 +1,19 @@
+# 3.0.0
+
+Release 3.0.0
+
+Update pagination handling, validation, and documentation.
+
+Changes since v2.4.5:
+
+```text
+README.md                  | 14 ++++++++
+ pyproject.toml             |  4 +--
+ xnxx_api/api.py            | 88 +++++++++++++++++++++++++++++-----------------
+ xnxx_api/modules/consts.py |  9 +++++
+ 4 files changed, 80 insertions(+), 35 deletions(-)
+```
+
 # Changelog
 
 ## 2.4.5 - 2026-11-14

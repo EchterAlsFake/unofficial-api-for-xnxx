@@ -18,6 +18,10 @@ headers = {
 
 def extractor_profile_json(content: str, base_url: str = "https://www.xnxx.com") -> list[dict]:
     data = json.loads(content)
+    if "videos" not in data and not (
+        data.get("result") is False and data.get("code") == 404
+    ):
+        raise ValueError("Profile listing omitted its videos array")
     videos = data.get("videos", [])
     if not isinstance(videos, list):
         raise ValueError("Profile listing did not contain a videos array")
@@ -72,6 +76,11 @@ def extractor_html(content: str, base_url: str = "https://www.xnxx.com") -> list
 
         if not isinstance(video_data["url"], str) or not video_data["url"]:
             continue
+        if urlsplit(video_data["url"]).path.startswith("/search-video/"):
+            key = video_node.attributes.get("data-eid") or video_node.attributes.get("id", "").removeprefix("video_")
+            if not re.fullmatch(r"[a-zA-Z0-9]+", key):
+                raise ValueError("Tracked search card omitted its video key")
+            video_data["url"] = urljoin(base_url, "/video-" + key + "/video")
 
         # Extract Thumbnail and new media URLs
         img_tag = video_node.css_first('.thumb img')

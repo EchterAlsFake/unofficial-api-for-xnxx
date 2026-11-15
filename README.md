@@ -133,3 +133,17 @@ This API is licensed under the AGPLv3. See the `LICENSE` file for details.
 > If you want to use this API without open-sourcing your own code, you must purchase a commercial license.
 > 
 > **For commercial licensing, contact:** EchterAlsFakeBS@proton.me
+
+## Pagination contract (3.0.0)
+
+Listing methods accept `pages=1` and `start_page=1`. Page numbers are one-based
+in the public API, including sites whose URLs use zero-based indexes.
+`pages=N` consumes at most N source pages; `pages="all"` follows verified
+navigation to exhaustion. Zero, negative numbers, booleans, fractions and numeric
+strings are rejected. A requested page limit is not proof that the source ended.
+
+Use `iterator_config=IteratorConfig(order="original", load_specific_sources=())`
+to enumerate listing identities without loading every detail page. Request and
+parser failures remain visible. Close partially consumed streams with `aclosing`
+(or `async with` for `ScrapeStream`). Source ordering can be selected explicitly
+through `IteratorConfig`. These changes require `eaf-base-api>=4.3.0`.
