@@ -9,3 +9,4 @@ dist/
 *.log
 *.mp4
 *.mp4.tmp
+uv.lock
